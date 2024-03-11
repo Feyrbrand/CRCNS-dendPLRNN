@@ -1,0 +1,178 @@
+import pandas as pd
+import h5py
+import numpy as np
+from sklearn.preprocessing import MinMaxScaler
+import os
+import sys
+
+def get_df_for_challenge(datafolder, challengename, total_time_in_seconds):
+    CURRENT_FILE = "current.txt"
+    VOLTAGE_FILE = "voltage_allrep.txt"
+    READ_CSV_CONFIG = {
+        "header": None,
+        "delim_whitespace": True
+    }
+    df_currents = pd.read_csv('%s/%s/%s' % (datafolder, challengename, CURRENT_FILE), **READ_CSV_CONFIG, names=["I"])
+    df_voltages = pd.read_csv('%s/%s/%s' % (datafolder, challengename, VOLTAGE_FILE), **READ_CSV_CONFIG)
+
+    df = df_currents.join(df_voltages)
+
+    df["t"] = pd.timedelta_range(start='0 seconds', end='%d seconds' % total_time_in_seconds, periods=len(
+        df))
+    df["t"] = df["t"].dt.total_seconds()
+    df = df.set_index("t", drop=False)
+    return df
+
+# function for not cutting at a specific time interval
+#
+def save_data_in_training_format_full(filename, input_trace, output_trace, other_traces, simulation_name, variable_names, filemode):
+    INPUT_IDX = 0
+    OUTPUT_IDX = 1
+    if filemode is None:
+        filemode = "a" if os.path.exists(filename) else "w"
+    file = h5py.File(filename, filemode)
+    variable_names = np.string_(variable_names)
+    number_of_recorded_variables = 2 + len(other_traces)
+    dset = file.create_dataset(simulation_name, shape=(len(input_trace), number_of_recorded_variables))
+    dset[:, INPUT_IDX] = input_trace
+    dset[:, OUTPUT_IDX] = output_trace
+    for i, trace in enumerate(other_traces):
+        dset[:, i + 2] = trace
+    dset.attrs.create("names", variable_names)
+    file.close()
+
+mode = 'train' # test
+datafolder = 'CRCNS-Data'
+challengename = 'crcns-ch-epfl-2009-challengeA'
+time_points_file = "challengeA_input_times.csv"
+total_time_in_seconds = 60
+time_points = pd.read_csv('%s/%s' % (datafolder, time_points_file), header=0, sep=",", skipinitialspace=True)
+
+for i in range(13):
+    rep = str(i).zfill(2)  # 00 to 12
+
+
+    df = get_df_for_challenge(datafolder, challengename, total_time_in_seconds)
+
+    poisson_start = time_points[time_points["type"] == "spike_trains_train"]["start"].values[0]
+    poisson_end = time_points[time_points["type"] == "spike_trains_train"]["end"].values[0]
+
+    # for 38 seconds
+    #poisson_end = poisson_end - 1
+    
+    train_start = poisson_start
+    train_end = poisson_start + 0.8 * (poisson_end-poisson_start)
+    test_start = train_end
+    test_end = poisson_end
+
+
+    #print(train_start)
+    #print(train_end)
+    #print(test_start)
+    #print(test_end)
+
+
+    filename = "CRCNS-Data/challengeA_%s%s.hdf5"%(mode,rep)
+
+    pdidx = pd.IndexSlice
+
+    train_df = df.loc[pdidx[train_start:train_end]]
+    test_df = df.loc[pdidx[test_start:test_end]]
+
+    if mode == 'test':
+
+        # dropped t and reduces to validation set
+
+        test_df = test_df.drop(columns=['t'])  # Drop the 't' column
+
+        save_data_in_training_format_full(filename, test_df["I"].values, test_df[int(rep)].values, [], "test",
+                             ["I", "V"], "a")
+
+        # test dataset cut 80/20
+
+        #%% load data and scale it.
+        dname = 'CRCNS-Data/challengeA_%s%s'%(mode,rep)
+        file = h5py.File("%s.hdf5"%dname, "r")
+
+
+        #print(file.keys())
+
+        data = file['test']
+        #print(data[:])
+
+        testX, testY = np.array(file['test']).T
+
+        I_scaler = MinMaxScaler(feature_range=(0, 1)).fit(testX.reshape(-1,1))
+        v_scaler = MinMaxScaler(feature_range=(0, 1)).fit(testY.reshape(-1,1))
+
+        testX = I_scaler.transform(testX.reshape(-1,1)).flatten()
+        testY = v_scaler.transform(testY.reshape(-1,1)).flatten()
+
+        # test set save path for all 00-12 repetitions
+
+        savepath = 'dendplrnn4neuron/BPTT_TF/Experiments/my_exp/crcns_data/'
+
+        dir = ''
+        for n in savepath.split('/'):
+            dir = dir + n + '/'
+            try:
+                os.listdir(dir)
+            except:
+                os.mkdir(dir)
+
+        cut_test = np.vstack([testY,testX]).T
+
+        np.save(savepath + 'test_data_crcns%s.npy'%(rep),cut_test[1:]) #.shape
+
+        print(f"val set {rep}")
+        print(np.vstack([testY,testX]).T.shape)
+        print(cut_test[1:].shape)
+
+    elif mode == 'train':
+
+        # dropped t and reduces to validation set
+
+        train_df = train_df.drop(columns=['t'])  # Drop the 't' column
+
+        save_data_in_training_format_full(filename, train_df["I"].values, train_df[int(rep)].values, [], "train",
+                             ["I", "V"], "w")
+
+        # test dataset cut 80/20
+
+        #%% load data and scale it.
+        dname = 'CRCNS-Data/challengeA_%s%s'%(mode,rep)
+        file = h5py.File("%s.hdf5"%dname, "r")
+
+
+        #print(file.keys())
+
+        data = file['train']
+        #print(data[:])
+
+        trainX, trainY = np.array(file['train']).T
+
+        I_scaler = MinMaxScaler(feature_range=(0, 1)).fit(trainX.reshape(-1,1))
+        v_scaler = MinMaxScaler(feature_range=(0, 1)).fit(trainY.reshape(-1,1))
+
+        trainX = I_scaler.transform(trainX.reshape(-1,1)).flatten()
+        trainY = v_scaler.transform(trainY.reshape(-1,1)).flatten()
+
+        # test set save path for all 00-12 repetitions
+
+        savepath = 'dendplrnn4neuron/BPTT_TF/Experiments/my_exp/crcns_data/'
+
+        dir = ''
+        for n in savepath.split('/'):
+            dir = dir + n + '/'
+            try:
+                os.listdir(dir)
+            except:
+                os.mkdir(dir)
+
+        cut_train = np.vstack([trainY,trainX]).T
+
+        np.save(savepath + 'train_data_crcns%s.npy'%(rep),cut_train[1:]) #.shape
+
+        print(f"val set {rep}")
+        print(np.vstack([trainY,trainX]).T.shape)
+        print(cut_train[1:].shape)
